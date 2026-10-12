@@ -82,6 +82,8 @@ cp -a /usr/share/gtksourceview-5 "$APPDIR/usr/share/"
 # that scans them (an executable, so it gets the bundled loader too).
 mkdir -p "$LIBDIR/gstreamer-1.0" "$APPDIR/usr/libexec/gstreamer-1.0"
 cp -aL "$SYSLIB"/gstreamer-1.0/*.so "$LIBDIR/gstreamer-1.0/"
+# Terminal video sinks have no use in a file manager and drag in ncurses and friends.
+rm -f "$LIBDIR"/gstreamer-1.0/libgstcacasink.so "$LIBDIR"/gstreamer-1.0/libgstaasink.so
 cp -aL "$SYSLIB/gstreamer1.0/gstreamer-1.0/gst-plugin-scanner" "$APPDIR/usr/libexec/gstreamer-1.0/"
 ls "$LIBDIR/gstreamer-1.0" | wc -l | sed 's/^/gstreamer plugins: /'
 

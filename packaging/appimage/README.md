@@ -34,8 +34,10 @@ appimagetool --no-appstream AppDir
   Every bundled ELF file carries a relative RPATH instead of an exported
   `LD_LIBRARY_PATH`, which would leak into every program Strata starts.
 - **Two host programs are still required**, as for every other way of running
-  Strata: `bwrap` (bubblewrap) and `prlimit` (util-linux). The preview sandbox
-  executes them from the host's trusted directories.
+  Strata: `bwrap` (bubblewrap, new enough to know `--size`; Ubuntu 22.04's 0.6
+  is not) and `prlimit` (util-linux). The preview sandbox executes them from
+  the host's trusted directories; without them Strata runs but shows no
+  previews.
 - **The preview sandbox sees the bundle.** Helpers run inside bubblewrap with
   a fresh `/tmp` and only the host's `/usr` bound, where neither the bundled
   loader nor the libraries exist. `AppRun` sets `STRATA_SANDBOX_EXTRA_ROOTS`

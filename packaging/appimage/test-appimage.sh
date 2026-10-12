@@ -82,7 +82,8 @@ echo "::group::The preview sandbox can run the bundled helper"
 # it the helper must find its loader and libraries although /tmp is a fresh
 # tmpfs and only the host's /usr is bound. Keep in step with runtime_command.
 convert -size 64x64 xc:red input.png
-convert -size 64x64 xc:blue input.pdf
+# A minimal PDF by hand: ImageMagick's PDF coder is policy-blocked on some distributions.
+printf '%%PDF-1.1\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 64 64]>>endobj\ntrailer<</Root 1 0 R>>\n' >input.pdf
 mkdir -p output
 sandbox() {
     bwrap --unshare-all --die-with-parent --new-session --clearenv \
@@ -94,10 +95,16 @@ sandbox() {
         --setenv GDK_PIXBUF_MODULE_FILE "$LOADER_DIR/loaders.cache" \
         --setenv GCONV_PATH "$APPDIR/usr/lib/gconv" \
         --ro-bind "$PWD/$1" "/$1" --bind "$PWD/output" /output \
-        -- "$APPDIR/usr/bin/strata" --preview-helper "$2" "/$1" "/output/$3" 64
+        -- "$APPDIR/usr/bin/strata" --preview-helper "$2" "/$1" "/output/$3" 64 software
 }
 SANDBOX_OK=1
-for job in "input.png thumbnail-image thumb.png" "input.pdf thumbnail-pdf page.png"; do
+# Strata's sandbox needs a bubblewrap that knows --size (Ubuntu 22.04's 0.6 does
+# not); on such a host previews are unavailable however Strata is installed.
+if ! bwrap --help 2>&1 | grep -q -- '--size'; then
+    echo "::notice::this host's bubblewrap has no --size; Strata's sandbox needs a newer one, check skipped"
+    SANDBOX_OK=skipped
+fi
+[ "$SANDBOX_OK" = skipped ] || for job in "input.png thumbnail-image thumb.png" "input.pdf thumbnail-pdf page.png"; do
     set -- $job
     rm -f "output/$3"
     if sandbox "$1" "$2" "$3" && [ -s "output/$3" ]; then
@@ -164,11 +171,14 @@ if [ -n "$PID" ]; then
         fi
     done
     # The host may only contribute libraries the bundle does not have (its GPU
-    # stack and what that pulls in); a host copy of a bundled one is the failure.
+    # stack and what that pulls in); a host copy of one the binary itself links
+    # is the failure. (A plugin's unloaded dependency sharing a name with
+    # something the host's GPU stack pulls in is not.)
+    CORE="$("$APPDIR"/lib/ld-* --library-path "$APPDIR/usr/lib" --list "$APPDIR/usr/bin/strata" | awk '/=>/{print $1}')"
     SHADOWED=0
     for lib in $(grep -o '/[^ ]*\.so[^ ]*' "/proc/$PID/maps" | sort -u | grep -v "$APPDIR" | grep -v "$LOADER_DIR"); do
         base="$(basename "$lib")"
-        if ls "$APPDIR/usr/lib/${base%%.so*}".so* >/dev/null 2>&1; then
+        if grep -qx "${base%%.so*}\.so\.[0-9]*" <<<"$CORE" && ls "$APPDIR/usr/lib/${base%%.so*}".so* >/dev/null 2>&1; then
             echo "::error::$lib was loaded from the host although the AppImage bundles it"
             SHADOWED=1
         fi
@@ -192,7 +202,7 @@ kill "$WM_PID" "$XVFB_PID" 2>/dev/null || true
 [ "$WINDOW_FOUND" -eq 1 ] || { echo "::error::no Strata window ever appeared"; exit 1; }
 [ "$RENDERED" -eq 1 ] || { echo "::error::Strata window exists but the screen stayed blank"; exit 1; }
 [ "$MISSING" -eq 0 ] || exit 1
-[ "$SANDBOX_OK" -eq 1 ] || exit 1
+[ "$SANDBOX_OK" != 0 ] || exit 1
 if grep -qiE 'Settings schema .* is not installed|Failed to load module|symbol lookup error|GLIBC_' "$OUT/strata-stdout.log"; then
     echo "::error::Strata reported a loading problem (see its output above)"
     exit 1
