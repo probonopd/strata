@@ -256,12 +256,22 @@ jobs:
           (cd dist && sha256sum "$package.tar.gz" > "$package.tar.gz.sha256")
           (cd dist && sha256sum "$package.debug" > "$package.debug.sha256")
 
+      # The same stripped binary, wrapped with everything it needs so that one
+      # file runs on any distribution (packaging/appimage/README.md).
+      - name: Package AppImage
+        uses: ./.github/actions/appimage
+        with:
+          binary: dist/strata-${{ needs.prepare.outputs.version }}-${{ matrix.target }}/strata
+          name: strata-${{ needs.prepare.outputs.version }}-${{ matrix.target }}
+          output: dist
+
       - name: Upload release artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: strata-${{ matrix.target }}
           path: |
             dist/*.tar.gz
+            dist/*.AppImage
             dist/*.debug
             dist/*.sha256
           if-no-files-found: error

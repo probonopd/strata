@@ -687,7 +687,51 @@ fn wait_for_renderer_reporting(
     }
 }
 
+/// Environment variable naming extra runtime trees, colon-separated absolute
+/// paths, that are bound read-only at their own paths. A relocatable bundle
+/// (an AppImage) keeps its libraries, loader and helper there, outside `/usr`.
+pub(crate) const EXTRA_ROOTS_VARIABLE: &str = "STRATA_SANDBOX_EXTRA_ROOTS";
+
+/// Relocated runtimes find their own loaders and plugins through these; they
+/// are passed into the sandbox only when extra runtime trees are bound.
+const RELOCATION_VARIABLES: &[&str] = &[
+    "FONTCONFIG_FILE",
+    "GCONV_PATH",
+    "GDK_PIXBUF_MODULE_FILE",
+    "GST_PLUGIN_SCANNER",
+    "GST_PLUGIN_SYSTEM_PATH_1_0",
+];
+
+fn extra_runtime_roots() -> Vec<PathBuf> {
+    std::env::var_os(EXTRA_ROOTS_VARIABLE)
+        .map(|value| {
+            std::env::split_paths(&value)
+                .filter(|root| root.is_absolute())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn runtime_command(bwrap: &Path, needs_media_libraries: bool) -> Command {
+    runtime_command_with(bwrap, needs_media_libraries, &extra_runtime_roots())
+}
+
+/// Binds the helper at `/app/strata` and returns that path, unless it lives in
+/// an extra runtime tree: then it runs in place, so its interpreter and
+/// `$ORIGIN`-relative libraries resolve inside the sandbox too.
+fn bind_helper(command: &mut Command, executable: &Path) -> PathBuf {
+    bind_helper_with(command, executable, &extra_runtime_roots())
+}
+
+fn bind_helper_with(command: &mut Command, executable: &Path, roots: &[PathBuf]) -> PathBuf {
+    if roots.iter().any(|root| executable.starts_with(root)) {
+        return executable.to_path_buf();
+    }
+    command.arg("--ro-bind").arg(executable).arg("/app/strata");
+    PathBuf::from("/app/strata")
+}
+
+fn runtime_command_with(bwrap: &Path, needs_media_libraries: bool, roots: &[PathBuf]) -> Command {
     let mut command = Command::new(bwrap);
     command.args([
         "--unshare-all",
@@ -753,6 +797,16 @@ fn runtime_command(bwrap: &Path, needs_media_libraries: bool) -> Command {
             }
         }
     }
+    for root in roots {
+        command.arg("--ro-bind").arg(root).arg(root);
+    }
+    if !roots.is_empty() {
+        for name in RELOCATION_VARIABLES {
+            if let Some(value) = std::env::var_os(name) {
+                command.arg("--setenv").arg(name).arg(value);
+            }
+        }
+    }
     command
 }
 
@@ -772,7 +826,7 @@ fn sandbox_command(
 ) -> Command {
     let mut command = runtime_command(bwrap, operation.needs_media_libraries());
     let sandbox_input = sandbox_input_path(input);
-    command.arg("--ro-bind").arg(executable).arg("/app/strata");
+    let helper = bind_helper(&mut command, executable);
     command.arg("--ro-bind").arg(input).arg(&sandbox_input);
     if !operation.is_media() {
         command.arg("--bind").arg(output).arg("/output");
@@ -804,12 +858,9 @@ fn sandbox_command(
             ))
             .arg("--");
     }
-    command.args([
-        "/app/strata",
-        "--preview-helper",
-        operation.argument(),
-        &sandbox_input,
-    ]);
+    command
+        .arg(&helper)
+        .args(["--preview-helper", operation.argument(), &sandbox_input]);
     if let ParseOperation::PreviewMedia(size) | ParseOperation::PreviewAudio(size) = operation {
         let size = MediaPreviewSize::new(size.width, size.height);
         command.arg("/dev/stdout");

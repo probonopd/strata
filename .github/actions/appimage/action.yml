@@ -1,0 +1,74 @@
+name: Package an AppImage
+description: >-
+  Turns an already built release binary into a self-contained AppImage
+  (packaging/appimage) and writes it, with its SHA-256, into the output
+  directory. Runs on x86_64 and aarch64 Ubuntu runners.
+
+inputs:
+  binary:
+    description: Path of the stripped release binary
+    required: true
+  name:
+    description: File name of the AppImage, without the .AppImage suffix
+    required: true
+  output:
+    description: Directory the AppImage and its checksum are written to
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Install the AppImage runtime pieces and packaging tools
+      shell: bash
+      run: |
+        sudo apt-get install --yes --no-install-recommends \
+          librsvg2-common adwaita-icon-theme gsettings-desktop-schemas poppler-data \
+          gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-libav \
+          libgtk-4-media-gstreamer gvfs fonts-dejavu-core patchelf file squashfs-tools
+
+    - name: Assemble the AppDir
+      shell: bash
+      env:
+        BINARY: ${{ inputs.binary }}
+      run: packaging/appimage/build-appdir.sh "$BINARY" AppDir
+
+    - name: Check that programs started from it get the host's environment back
+      # The hook is linked against the bundled glibc, which is also this runner's,
+      # so a host program can be run through it here.
+      shell: bash
+      run: |
+        loader="$(ls AppDir/lib/ld-*)"
+        out="$(APPIMAGE_RESTORE_VARS='GDK_PIXBUF_MODULE_FILE XDG_DATA_DIRS LD_PRELOAD' \
+          APPIMAGE_ORIG_XDG_DATA_DIRS=/original GDK_PIXBUF_MODULE_FILE=/leaked XDG_DATA_DIRS=/leaked \
+          LD_PRELOAD="$PWD/AppDir/usr/lib/exec.so" \
+          "$loader" --library-path AppDir/usr/lib /usr/bin/python3 -c \
+            'import subprocess; print(subprocess.run(["/usr/bin/env"], capture_output=True, text=True).stdout)')"
+        echo "$out" | grep -qx 'XDG_DATA_DIRS=/original'
+        ! echo "$out" | grep -qE 'leaked|LD_PRELOAD|APPIMAGE_'
+
+    - name: Create the AppImage
+      shell: bash
+      env:
+        # A tagged appimagetool release, verified by checksum. To update, change the
+        # version and both checksums (sha256 of .../releases/download/<tag>/appimagetool-<arch>.AppImage).
+        APPIMAGETOOL_VERSION: '1.9.1'
+        APPIMAGETOOL_SHA256_X86_64: ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0
+        APPIMAGETOOL_SHA256_AARCH64: f0837e7448a0c1e4e650a93bb3e85802546e60654ef287576f46c71c126a9158
+        NAME: ${{ inputs.name }}
+        OUTPUT: ${{ inputs.output }}
+      run: |
+        arch="$(uname -m)"
+        case "$arch" in
+          x86_64) sha="$APPIMAGETOOL_SHA256_X86_64" ;;
+          aarch64) sha="$APPIMAGETOOL_SHA256_AARCH64" ;;
+          *) echo "::error::no appimagetool checksum for $arch"; exit 1 ;;
+        esac
+        curl -fsSLo appimagetool "https://github.com/AppImage/appimagetool/releases/download/${APPIMAGETOOL_VERSION}/appimagetool-${arch}.AppImage"
+        echo "${sha}  appimagetool" | sha256sum -c -
+        chmod +x appimagetool
+        # Runners have no /dev/fuse: extract appimagetool instead of running it.
+        ./appimagetool --appimage-extract >/dev/null
+        mkdir -p "$OUTPUT"
+        ARCH="$arch" squashfs-root/AppRun --no-appstream AppDir "$OUTPUT/$NAME.AppImage"
+        (cd "$OUTPUT" && sha256sum "$NAME.AppImage" > "$NAME.AppImage.sha256")
+        ls -lh "$OUTPUT/$NAME.AppImage"

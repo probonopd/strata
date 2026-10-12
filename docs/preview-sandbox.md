@@ -42,6 +42,26 @@ These settings apply to one-shot, pooled browser, media, and RAR extraction
 sandboxes. They do not change host-side trusted bubblewrap lookup, namespace
 isolation, resource limits, or the other narrow optional runtime mounts.
 
+### Relocatable bundles
+
+A bundle that carries its own libraries at a path only known when it starts,
+such as an AppImage mounted under `/tmp`, sets one **runtime** environment
+variable instead:
+
+| Runtime variable | Purpose |
+| --- | --- |
+| `STRATA_SANDBOX_EXTRA_ROOTS` | Colon-separated absolute directories bound read-only at the same paths, after the system mounts |
+
+A helper executable under one of these roots runs from its own path rather
+than from `/app/strata`, so its ELF interpreter and `$ORIGIN`-relative RPATH
+resolve inside the sandbox. While extra roots are bound, `FONTCONFIG_FILE`,
+`GCONV_PATH`, `GDK_PIXBUF_MODULE_FILE`, `GST_PLUGIN_SCANNER` and
+`GST_PLUGIN_SYSTEM_PATH_1_0` are passed through from the launcher's environment
+when set, since a relocated runtime finds its loaders and plugins through them.
+Everything else stays as above: the system tree, `--clearenv`, namespaces and
+limits are unchanged, and the same trust rule applies to the extra roots. See
+`packaging/appimage/README.md` for the bundle that uses this.
+
 ## Providers
 
 - GDK Pixbuf/camera RAW, Poppler PDF, ImageMagick, and dcraw fallbacks normalize

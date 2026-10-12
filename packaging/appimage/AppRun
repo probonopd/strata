@@ -1,0 +1,105 @@
+#!/bin/sh
+# AppRun for the Strata AppImage.
+#
+# The AppImage ships its own glibc, so every executable in it has its ELF
+# interpreter patched to @LOADER@ (a fixed path chosen at build time; the
+# kernel cannot expand variables there). This script puts a copy of the bundled
+# dynamic loader at that path, points the bundled GTK and GStreamer at their
+# runtime data, tells the preview sandbox where the bundle lives, and starts
+# Strata.
+HERE="$(dirname "$(readlink -f "$0")")"
+LOADER="@LOADER@"
+LOADER_DIR="$(dirname "$LOADER")"
+BUNDLED_LOADER="$HERE/lib/@LOADER_NAME@"
+
+# Only coreutils here: minimal containers lack cmp, find, ...
+same_loader() {
+    [ -f "$LOADER" ] && [ "$(sha256sum <"$BUNDLED_LOADER")" = "$(sha256sum <"$LOADER")" ]
+}
+if ! same_loader; then
+    umask 022
+    mkdir -p "$LOADER_DIR" 2>/dev/null
+    tmp="$(mktemp "$LOADER_DIR/.ld.XXXXXX" 2>/dev/null)" &&
+        cp "$BUNDLED_LOADER" "$tmp" && chmod 755 "$tmp" &&
+        mv -f "$tmp" "$LOADER"
+fi
+# Never trust a loader directory someone else owns or can write to: it is
+# executed as the interpreter of every process in the bundle, inside the
+# preview sandbox included.
+owner="$(stat -c %u "$LOADER_DIR" 2>/dev/null)"
+mode="$(stat -c %a "$LOADER_DIR" 2>/dev/null)"
+case "$mode" in
+*[2367]? | *[2367]) writable=1 ;;
+*) writable=0 ;;
+esac
+if ! same_loader || [ "$writable" = 1 ] || { [ "$owner" != "$(id -u)" ] && [ "$owner" != 0 ]; }; then
+    echo "Strata AppImage: cannot set up the bundled loader in $LOADER_DIR" >&2
+    echo "(the directory must be writable by you only and /tmp must allow exec)" >&2
+    exit 1
+fi
+
+# Everything exported below is for the bundled runtime only. Programs Strata
+# starts (the applications it opens files with, terminals, bubblewrap, ...)
+# belong to the host and get the environment back the way it was:
+# usr/lib/exec.so, preloaded here, restores every variable named in
+# APPIMAGE_RESTORE_VARS from APPIMAGE_ORIG_<NAME> on each exec. Deliberately
+# NO LD_LIBRARY_PATH: every bundled ELF carries a relative RPATH instead
+# (set-runpaths.sh).
+APPIMAGE_RESTORE_VARS=""
+remember() { # remember NAME: keep what NAME was before AppRun changed it
+    eval "if [ -n \"\${$1+x}\" ]; then export APPIMAGE_ORIG_$1=\"\$$1\"; fi"
+    APPIMAGE_RESTORE_VARS="$APPIMAGE_RESTORE_VARS${APPIMAGE_RESTORE_VARS:+ }$1"
+}
+setenv() { remember "$1" && export "$1=$2"; }
+unsetenv() { remember "$1" && unset "$1"; }
+setenv LD_PRELOAD "$HERE/usr/lib/exec.so${LD_PRELOAD:+:$LD_PRELOAD}"
+# The pixbuf loader cache needs absolute paths, and the mount point is only
+# known now. It lives next to the loader so that the preview sandbox sees it.
+sed "s|@LOADERS@|$HERE/usr/lib/gdk-pixbuf-2.0/2.10.0/loaders|" \
+    "$HERE/usr/lib/gdk-pixbuf-2.0/2.10.0/loaders.cache.in" >"$LOADER_DIR/loaders.cache"
+setenv GDK_PIXBUF_MODULE_FILE "$LOADER_DIR/loaders.cache"
+setenv GCONV_PATH "$HERE/usr/lib/gconv"
+setenv XDG_DATA_DIRS "$HERE/usr/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+# GTK's compiled-in prefix is the build machine's /usr; its modules (the media
+# backend, print backends) must come from the bundle, never from a host GTK.
+setenv GTK_EXE_PREFIX "$HERE/usr"
+setenv GTK_DATA_PREFIX "$HERE/usr"
+# Modules from the host (dconf, GTK input methods, ...) are built against the
+# host's GLib and GTK, so none may be loaded into the bundled ones. The one
+# GIO module in the bundle is GVfs's client, linked against the bundled GLib.
+setenv GIO_MODULE_DIR "$HERE/usr/lib/gio/modules"
+setenv GSETTINGS_BACKEND memory
+unsetenv GTK_PATH
+unsetenv GTK_MODULES
+unsetenv GTK_IM_MODULE
+# GStreamer: bundled plugins, bundled scanner, and a registry of our own so the
+# host's plugin cache is never mixed in.
+setenv GST_PLUGIN_SYSTEM_PATH_1_0 "$HERE/usr/lib/gstreamer-1.0"
+setenv GST_PLUGIN_SCANNER "$HERE/usr/libexec/gstreamer-1.0/gst-plugin-scanner"
+setenv GST_REGISTRY_1_0 "${XDG_CACHE_HOME:-$HOME/.cache}/strata-appimage/gst-registry-$(basename "$LOADER_DIR").bin"
+# The bundled fontconfig reads the host's configuration and fonts; a host
+# without any gets the bundled DejaVu through the bundled configuration.
+if [ ! -r /etc/fonts/fonts.conf ] && [ -z "$FONTCONFIG_FILE" ]; then
+    setenv FONTCONFIG_FILE "$HERE/etc/fonts/fonts.conf"
+fi
+# The preview sandbox binds only the host's system tree. Tell it where the
+# bundle and its loader are (docs/preview-sandbox.md, "Relocatable bundles").
+setenv STRATA_SANDBOX_EXTRA_ROOTS "$HERE:$LOADER_DIR"
+export APPIMAGE_RESTORE_VARS
+
+if [ -n "$STRATA_APPIMAGE_DEBUG" ]; then
+    # Troubleshooting: STRATA_APPIMAGE_DEBUG=1 ./Strata-*.AppImage prints the
+    # environment, GTK's OpenGL debug output and, with gdb installed, a
+    # backtrace of a crash.
+    echo "== AppImage environment ==" >&2
+    env | sort | grep -E '^(APPDIR|APPIMAGE|LD_|GDK_|GSK_|GTK_|GIO_|GSETTINGS_|GST_|XDG_|FONTCONFIG|STRATA_|WAYLAND|DISPLAY|DBUS|LANG|LC_)' >&2
+    export GDK_DEBUG=opengl,misc LIBGL_DEBUG=verbose EGL_LOG_LEVEL=debug
+    if command -v gdb >/dev/null 2>&1; then
+        exec gdb -q -batch -ex 'set pagination off' -ex 'handle SIGPIPE nostop noprint' -ex run \
+            -ex 'echo \n== backtrace ==\n' -ex bt -ex 'thread apply all bt 30' \
+            --args "$HERE/usr/bin/strata" "$@"
+    fi
+    echo "gdb not found; install it to get a backtrace" >&2
+fi
+
+exec "$HERE/usr/bin/strata" "$@"
