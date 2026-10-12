@@ -22,9 +22,9 @@ const PDF_PREVIEW: super::ParseOperation = super::ParseOperation::PreviewPdf(Pdf
 
 use super::{
     Cancellation, MAX_RASTER_INPUT_BYTES, MediaPreviewBackend, OutputError, ParseOperation,
-    PdfRenderSize, PrivateOutput, archive_output_error, gpu_devices, parse,
-    polaris_gpu_available_at, resolve_renderer_executable, sandbox_command, sandbox_input_path,
-    spawn_renderer, stage_secret_anon, valid_output, wait_for_renderer,
+    PdfRenderSize, PrivateOutput, archive_output_error, bind_helper_with, gpu_devices, parse,
+    polaris_gpu_available_at, resolve_renderer_executable, runtime_command_with, sandbox_command,
+    sandbox_input_path, spawn_renderer, stage_secret_anon, valid_output, wait_for_renderer,
 };
 
 #[test]
@@ -1044,4 +1044,61 @@ fn archive_operation_debug_redacts_the_password() {
         rendered.contains("password: None"),
         "an absent password must stay distinguishable, got {rendered:?}"
     );
+}
+
+#[test]
+fn extra_runtime_roots_are_bound_and_the_helper_runs_in_place() {
+    let roots = [
+        PathBuf::from("/tmp/.mount_strata"),
+        PathBuf::from("/tmp/.strata-loader"),
+    ];
+    let mut command = runtime_command_with(Path::new("/usr/bin/bwrap"), false, &roots);
+    let helper = bind_helper_with(
+        &mut command,
+        Path::new("/tmp/.mount_strata/usr/bin/strata"),
+        &roots,
+    );
+    assert_eq!(helper, Path::new("/tmp/.mount_strata/usr/bin/strata"));
+    let arguments: Vec<_> = command
+        .get_args()
+        .map(|argument| argument.to_string_lossy().into_owned())
+        .collect();
+    let joined = arguments.join(" ");
+    assert!(joined.contains("--ro-bind /tmp/.mount_strata /tmp/.mount_strata"));
+    assert!(joined.contains("--ro-bind /tmp/.strata-loader /tmp/.strata-loader"));
+    assert!(!joined.contains("/app/strata"));
+    // The runtime trees are bound after the tmpfs that would otherwise hide them.
+    let tmpfs = arguments.iter().position(|argument| argument == "--tmpfs");
+    let root = arguments
+        .iter()
+        .position(|argument| argument == "/tmp/.mount_strata");
+    assert!(tmpfs < root);
+}
+
+#[test]
+fn a_helper_outside_the_extra_roots_is_still_bound_at_app() {
+    let roots = [PathBuf::from("/tmp/.mount_strata")];
+    let mut command = runtime_command_with(Path::new("/usr/bin/bwrap"), false, &roots);
+    let helper = bind_helper_with(&mut command, Path::new("/usr/bin/strata"), &roots);
+    assert_eq!(helper, Path::new("/app/strata"));
+    let joined = command
+        .get_args()
+        .map(|argument| argument.to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(joined.contains("--ro-bind /usr/bin/strata /app/strata"));
+}
+
+#[test]
+fn without_extra_roots_nothing_relocates() {
+    let mut command = runtime_command_with(Path::new("/usr/bin/bwrap"), false, &[]);
+    let helper = bind_helper_with(&mut command, Path::new("/tmp/strata"), &[]);
+    assert_eq!(helper, Path::new("/app/strata"));
+    let joined = command
+        .get_args()
+        .map(|argument| argument.to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(joined.contains("--ro-bind /tmp/strata /app/strata"));
+    assert!(!joined.contains("GST_PLUGIN_SYSTEM_PATH_1_0"));
 }

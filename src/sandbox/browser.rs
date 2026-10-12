@@ -773,10 +773,8 @@ impl ProcessWorker {
         let bwrap = crate::trusted_command::resolve("bwrap")
             .map_err(|error| io::Error::other(super::sandbox_unavailable(&error)))?;
         let mut command = super::runtime_command(&bwrap, true);
+        let helper = super::bind_helper(&mut command, &executable);
         command
-            .args(["--ro-bind"])
-            .arg(executable)
-            .arg("/app/strata")
             .args([
                 "--setenv",
                 "MALLOC_ARENA_MAX",
@@ -791,9 +789,9 @@ impl ProcessWorker {
                 "MAGICK_THREAD_LIMIT",
                 "1",
                 "--",
-                "/app/strata",
-                "--browser-worker",
             ])
+            .arg(&helper)
+            .arg("--browser-worker")
             .stdin(Stdio::from(std::os::fd::OwnedFd::from(child_socket)))
             .stdout(Stdio::null())
             .stderr(Stdio::null());
